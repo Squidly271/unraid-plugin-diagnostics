@@ -1,6 +1,6 @@
 <?php
 
-namespace EDACerton\PluginDiagnostics;
+namespace EDACerton\PluginUtils;
 
 /*
     Copyright (C) 2025  Derek Kaser
@@ -19,96 +19,107 @@ namespace EDACerton\PluginDiagnostics;
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-class Utils extends \EDACerton\PluginUtils\Utils
+class Utils
 {
-    public static function send_file(string $url, string $file): string
+    private string $pluginName;
+
+    public function __construct(string $pluginName)
     {
-        if (empty($url)) {
-            throw new \InvalidArgumentException("URL cannot be empty");
+        $this->pluginName = $pluginName;
+        if ( ! defined(__NAMESPACE__ . "\PLUGIN_NAME")) {
+            define(__NAMESPACE__ . "\PLUGIN_NAME", $pluginName);
         }
-
-        if ( ! file_exists($file)) {
-            throw new \InvalidArgumentException("File does not exist: {$file}");
-        }
-
-        $token = self::download_url($url . '?connect');
-
-        $c = curl_init();
-        curl_setopt($c, CURLOPT_URL, $url);
-
-        $headers = [
-            'Authorization: Bearer ' . $token
-        ];
-
-        $curlFile = new \CURLFile($file, "application/zip");
-        $body     = [
-            'diagFile' => $curlFile,
-        ];
-        curl_setopt($c, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($c, CURLOPT_POST, true);
-        curl_setopt($c, CURLOPT_POSTFIELDS, $body);
-        curl_setopt($c, CURLOPT_HTTPHEADER, $headers);
-        curl_setopt($c, CURLOPT_USERAGENT, 'plugin-diagnostics/1.0.0');
-
-        $out = curl_exec($c) ?: false;
-
-        return strval($out);
-    }
-
-    public static function download_url(string $url): string
-    {
-        if (empty($url)) {
-            throw new \InvalidArgumentException("URL cannot be empty");
-        }
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_FRESH_CONNECT, true);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 45);
-        curl_setopt($ch, CURLOPT_ENCODING, "");
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_FAILONERROR, true);
-        curl_setopt($ch, CURLOPT_USERAGENT, 'plugin-diagnostics/1.0.0');
-        $out = curl_exec($ch) ?: false;
-        curl_close($ch);
-        return strval($out);
-    }
-
-    private static function run(string $cmd): void
-    {
-        exec("timeout -s9 30 {$cmd}");
     }
 
     /**
-     * @param array<mixed> $customFilters
+     * @return array<string>
      */
-    public static function sanitizeFile(string $file, array $customFilters = array()): void
+    public function run_command(string $command, bool $alwaysShow = false, bool $show = true): array
     {
-        $defaultFilters = [
-            "s/([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/\\1\.aaa\.aaa\.\\4/g",
-            "s/([\"\[ ]([0-9a-f]{1,4}:){4})(([0-9a-f]{1,4}:){3}|:)([0-9a-f]{1,4})([/\" .]|$)/\\1XXXX:XXXX:XXXX:\\5\\6/g"
-        ];
+        $output = array();
+        $retval = null;
+        if ($show) {
+            $this->logmsg("exec: {$command}");
+        }
+        exec("{$command} 2>&1", $output, $retval);
 
-        $filters = array_merge($defaultFilters, $customFilters);
+        if (($retval != 0) || $alwaysShow) {
+            $this->logmsg("Command returned {$retval}" . PHP_EOL . implode(PHP_EOL, $output));
+        }
 
-        $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+        return $output;
+    }
 
-        foreach ($filters as $filter) {
-            if ( ! is_string($filter) || empty($filter)) {
-                throw new \InvalidArgumentException("Invalid filter");
-            }
+    public function logmsg(string $message, bool $debug = false, bool $rateLimit = false): void
+    {
+        if ($rateLimit && (intval(date("i")) % 10 != 0)) {
+            // Only log rate limited messages every 10 minutes
+            return;
+        }
 
-            switch ($ext) {
-                case "gz":
-                    copy($file, "{$file}~");
-                    self::run("gzip -cd " . escapeshellarg("{$file}~") . " | sed -r '{$filter}' | gzip > " . escapeshellarg($file));
-                    unlink("{$file}~");
-                    break;
-                default:
-                    self::run("sed -ri '{$filter}' " . escapeshellarg($file) . " 2>/dev/null");
+        if ($debug) {
+            if (defined("PLUGIN_DEBUG")) {
+                $message = "DEBUG: " . $message;
+            } else {
+                return;
             }
         }
+
+        $timestamp = date('Y/m/d H:i:s');
+        $filename  = basename(is_string($_SERVER['PHP_SELF']) ? $_SERVER['PHP_SELF'] : "");
+        file_put_contents("/var/log/" . $this->pluginName . ".log", "{$timestamp} {$filename}: {$message}" . PHP_EOL, FILE_APPEND);
+    }
+
+    public static function auto_v(string $file): string
+    {
+        global $docroot;
+        $path = $docroot . $file;
+        clearstatcache(true, $path);
+        $time    = file_exists($path) ? filemtime($path) : 'autov_fileDoesntExist';
+        $newFile = "{$file}?v=" . $time;
+
+        return $newFile;
+    }
+
+    public static function make_option(bool|string $selected, string $value, string $text, string $extra = ""): string
+    {
+        if (is_string($selected)) {
+            $selected = $selected === $value;
+        }
+
+        return "<option value='{$value}'" . ($selected ? " selected" : "") . (strlen($extra) ? " {$extra}" : "") . ">{$text}</option>";
+    }
+
+    /**
+    * @param array<mixed> $args
+    */
+    public function run_task(string $functionName, array $args = array()): mixed
+    {
+        try {
+            // Check if it's a class method (contains ::) or a global function
+            if (strpos($functionName, '::') !== false) {
+                $reflectionMethod = \ReflectionMethod::createFromMethodName($functionName);
+                return $reflectionMethod->invokeArgs(null, $args);
+            } else {
+                $reflectionFunction = new \ReflectionFunction($functionName);
+                return $reflectionFunction->invokeArgs($args);
+            }
+        } catch (\Throwable $e) {
+            $this->logmsg("Caught exception in {$functionName} : " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public static function parse_plugin_cfg(string $plugin): array
+    {
+        $default = "/usr/local/emhttp/plugins/{$plugin}/default.cfg";
+        $user    = "/boot/config/plugins/{$plugin}/{$plugin}.cfg";
+
+        $cfg_default = parse_ini_file($default, false, INI_SCANNER_RAW) ?: array();
+        $cfg_user    = parse_ini_file($user, false, INI_SCANNER_RAW) ?: array();
+        return array_replace_recursive($cfg_default, $cfg_user);
     }
 }
